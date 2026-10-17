@@ -306,8 +306,8 @@
   (() => {
     'use strict';
     const STORAGE_KEY = 'aphroditeMastersFootballCamp_v1';
-    const CAMP_API_ENDPOINT = 'https://script.google.com/macros/s/AKfycbzIUCfpRisdwtQxFkTGCNCNiep4qr2lzoc7osZb8PsoDc5wieodXffmnk75PzHDLp0C/exec';
-    const FORM_TOKEN = 'AH-RACKET-2026';
+    const CAMP_API_ENDPOINT = 'PASTE_YOUR_MASTERS_CAMP_WEB_APP_URL_HERE';
+    const FORM_TOKEN = 'MC-FORM-2026';
     let sheetsAccessKey = '';
     let sheetsConnected = false;
     let sheetsLoaded = false;
@@ -699,6 +699,7 @@
     }
 
     async function postCampApi(action, extra = {}, accessKey = sheetsAccessKey) {
+      if (CAMP_API_ENDPOINT.indexOf('PASTE_YOUR') === 0) throw new Error('Paste your dedicated Masters Camp Apps Script /exec URL into CAMP_API_ENDPOINT in index.html.');
       const response = await fetch(CAMP_API_ENDPOINT, {
         method: 'POST',
         headers: { 'Content-Type': 'text/plain;charset=utf-8' },
