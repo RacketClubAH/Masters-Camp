@@ -1523,32 +1523,62 @@ async function buildCompletedFormPdfBase64_(form, cfg){
   const sourceForm = form;
   const copyForm = view.querySelector('form');
   if (!copyForm) throw new Error('Could not find the registration fields for PDF export.');
-  const sourceControls = sourceForm.querySelectorAll('input,select,textarea');
-  const copiedControls = copyForm.querySelectorAll('input,select,textarea');
+  const sourceControls = Array.from(sourceForm.querySelectorAll('input,select,textarea'));
+  const copiedControls = Array.from(copyForm.querySelectorAll('input,select,textarea'));
   sourceControls.forEach((source, index) => {
     const target = copiedControls[index];
     if (!target) return;
-    if (source.tagName === 'SELECT') {
-      Array.from(target.options).forEach((option, i) => {
-        const selected = !!(source.options[i] && source.options[i].selected);
-        option.selected = selected;
-        if (selected) option.setAttribute('selected', 'selected');
-        else option.removeAttribute('selected');
-      });
-      target.selectedIndex = source.selectedIndex;
-    } else if (source.type === 'checkbox' || source.type === 'radio') {
-      target.checked = source.checked;
-      if (source.checked) target.setAttribute('checked', 'checked');
-      else target.removeAttribute('checked');
-    } else if (source.tagName === 'TEXTAREA') {
-      target.value = source.value;
-      target.textContent = source.value;
-    } else {
-      target.value = source.value;
-      if (source.hasAttribute('value')) target.setAttribute('value', source.value);
-      else if (source.type !== 'hidden') target.setAttribute('value', source.value);
+
+    // Hidden helpers and searchable country-code menu inputs are not part of the paper form.
+    if (source.type === 'hidden') {
+      target.remove();
+      return;
     }
-    target.disabled = source.disabled;
+
+    const isChoice = source.type === 'checkbox' || source.type === 'radio';
+    const valueEl = document.createElement(isChoice ? 'span' : 'div');
+    valueEl.className = (target.className || '') + ' pdf-field-value';
+    valueEl.style.boxSizing = 'border-box';
+
+    if (source.tagName === 'SELECT') {
+      const selected = Array.from(source.selectedOptions || [])
+        .map(option => (option.textContent || '').trim())
+        .filter(Boolean);
+      valueEl.classList.add('pdf-select-value');
+      valueEl.textContent = selected.join(', ') || '\u00a0';
+      valueEl.setAttribute('aria-label', selected.join(', ') || 'No selection');
+    } else if (isChoice) {
+      valueEl.className = 'pdf-choice-mark' + (source.checked ? ' is-checked' : '') + (source.type === 'radio' ? ' is-radio' : '');
+      valueEl.textContent = source.checked ? (source.type === 'radio' ? '●' : '✓') : '';
+      valueEl.setAttribute('aria-label', source.checked ? 'Selected' : 'Not selected');
+    } else {
+      const value = source.value || '';
+      valueEl.classList.add('pdf-text-value');
+      valueEl.textContent = value.length ? value : '\u00a0';
+      valueEl.setAttribute('aria-label', value || 'Blank');
+    }
+
+    // Replace native controls: html2canvas clips some native input/select text.
+    // Static elements wrap naturally and do not have an internal control viewport.
+    valueEl.style.height = 'auto';
+    valueEl.style.maxHeight = 'none';
+    valueEl.style.minWidth = '0';
+    valueEl.style.maxWidth = '100%';
+    valueEl.style.overflow = 'visible';
+    valueEl.style.textOverflow = 'clip';
+    valueEl.style.whiteSpace = source.tagName === 'TEXTAREA' ? 'pre-wrap' : 'normal';
+    valueEl.style.overflowWrap = 'anywhere';
+    valueEl.style.wordBreak = 'normal';
+    valueEl.style.boxShadow = 'none';
+    valueEl.style.transition = 'none';
+    if (source.tagName === 'TEXTAREA') {
+      valueEl.style.minHeight = '96px';
+      valueEl.style.lineHeight = '1.55';
+    } else if (!isChoice) {
+      valueEl.style.minHeight = '49px';
+      valueEl.style.display = 'block';
+    }
+    target.replaceWith(valueEl);
   });
 
   // Canvas pixels do not survive cloneNode(), so replace the clone with its exact signature image.
@@ -1583,6 +1613,15 @@ async function buildCompletedFormPdfBase64_(form, cfg){
     .pdf-export-root .fieldset, .pdf-export-root .disclaimer, .pdf-export-root .sig__frame { break-inside:avoid !important; page-break-inside:avoid !important; }
     .pdf-export-root .field { break-inside:avoid; page-break-inside:avoid; }
     .pdf-export-root .input, .pdf-export-root .textarea { color:rgba(0,0,0,.70) !important; }
+    .pdf-export-root .pdf-field-value { box-sizing:border-box !important; width:100% !important; height:auto !important; max-height:none !important; overflow:visible !important; text-overflow:clip !important; white-space:normal !important; overflow-wrap:anywhere !important; word-break:normal !important; box-shadow:none !important; transition:none !important; }
+    .pdf-export-root .pdf-field-value.input { display:block !important; min-height:49px !important; line-height:1.45 !important; padding:11px 14px !important; }
+    .pdf-export-root .pdf-field-value.textarea { display:block !important; min-height:96px !important; padding:13px 14px !important; white-space:pre-wrap !important; line-height:1.55 !important; }
+    .pdf-export-root .pdf-field-value.input.pdf-select-value { display:block !important; min-height:49px !important; padding:12px 14px !important; line-height:1.45 !important; }
+    .pdf-export-root .pdf-choice-mark { box-sizing:border-box !important; display:inline-grid !important; place-items:center !important; width:20px !important; height:20px !important; min-width:20px !important; min-height:20px !important; border:1px solid var(--bronze) !important; border-radius:2px !important; color:var(--foam) !important; background:#fff !important; font:500 13px/1 Arial,sans-serif !important; align-self:start !important; }
+    .pdf-export-root .pdf-choice-mark.is-checked { background:var(--mple) !important; border-color:var(--mple) !important; }
+    .pdf-export-root .pdf-choice-mark.is-radio { border-radius:50% !important; color:var(--mple) !important; background:#fff !important; font-size:10px !important; }
+    .pdf-export-root .check { align-items:start !important; }
+    .pdf-export-root .pdf-text-value { flex-wrap:wrap !important; }
     .pdf-export-root .view[hidden] { display:block !important; }
   `;
   root.appendChild(style);
