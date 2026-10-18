@@ -975,6 +975,8 @@ input[type="date"].input{min-height:49px}
   <a href="mailto:info@aphroditehills.com">info@aphroditehills.com</a> &nbsp;·&nbsp; <a href="https://aphroditehills.com">aphroditehills.com</a>
 </footer>
 
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.11.3/html2pdf.bundle.min.js" crossorigin="anonymous"></script>
+
 <script>
 /* ==================================================================
    CONFIG — the only two lines you normally edit
@@ -1356,6 +1358,151 @@ function hideStatus(key){
   document.getElementById(PROGRAMMES[key].status).classList.remove('is-shown');
 }
 
+/*
+ * Create a PDF from the same rendered customer-facing form, not a separately
+ * designed summary. The page's own HTML/CSS, selected options, entered values,
+ * consent language, and the actual signature canvas are copied into the export.
+ */
+async function buildCompletedFormPdfBase64_(form, cfg){
+  if (typeof window.html2pdf !== 'function') {
+    throw new Error('The PDF renderer did not load. Please reload the registration form and try again.');
+  }
+  try { if (document.fonts && document.fonts.ready) await document.fonts.ready; } catch (_) {}
+
+  const sourceView = document.getElementById(cfg.view);
+  const sourceHeader = document.querySelector('.masthead');
+  const sourceFooter = document.querySelector('.footer');
+  if (!sourceView || !sourceHeader) throw new Error('Could not prepare the completed registration form for PDF export.');
+
+  const root = document.createElement('div');
+  root.className = 'pdf-export-root';
+  root.style.cssText = 'position:absolute;left:0;top:0;width:794px;max-width:794px;z-index:-1000;overflow:visible;background:#F9F6F4;color:rgba(0,0,0,.70);';
+
+  const masthead = sourceHeader.cloneNode(true);
+  masthead.style.width = '794px';
+  masthead.style.boxSizing = 'border-box';
+  const page = document.createElement('main');
+  page.className = 'page';
+  page.style.width = '794px';
+  page.style.maxWidth = '794px';
+  page.style.margin = '0';
+  page.style.padding = '38px 40px 46px';
+  page.style.flex = 'none';
+  page.style.boxSizing = 'border-box';
+
+  const view = sourceView.cloneNode(true);
+  view.hidden = false;
+  view.removeAttribute('hidden');
+  view.style.display = 'block';
+  view.style.width = '100%';
+  view.style.maxWidth = '100%';
+
+  const sourceForm = form;
+  const copyForm = view.querySelector('form');
+  if (!copyForm) throw new Error('Could not find the registration fields for PDF export.');
+  const sourceControls = sourceForm.querySelectorAll('input,select,textarea');
+  const copiedControls = copyForm.querySelectorAll('input,select,textarea');
+  sourceControls.forEach((source, index) => {
+    const target = copiedControls[index];
+    if (!target) return;
+    if (source.tagName === 'SELECT') {
+      Array.from(target.options).forEach((option, i) => {
+        const selected = !!(source.options[i] && source.options[i].selected);
+        option.selected = selected;
+        if (selected) option.setAttribute('selected', 'selected');
+        else option.removeAttribute('selected');
+      });
+      target.selectedIndex = source.selectedIndex;
+    } else if (source.type === 'checkbox' || source.type === 'radio') {
+      target.checked = source.checked;
+      if (source.checked) target.setAttribute('checked', 'checked');
+      else target.removeAttribute('checked');
+    } else if (source.tagName === 'TEXTAREA') {
+      target.value = source.value;
+      target.textContent = source.value;
+    } else {
+      target.value = source.value;
+      if (source.hasAttribute('value')) target.setAttribute('value', source.value);
+      else if (source.type !== 'hidden') target.setAttribute('value', source.value);
+    }
+    target.disabled = source.disabled;
+  });
+
+  // Canvas pixels do not survive cloneNode(), so replace the clone with its exact signature image.
+  const sourceCanvases = sourceForm.querySelectorAll('canvas.sig__canvas');
+  const clonedCanvases = copyForm.querySelectorAll('canvas.sig__canvas');
+  sourceCanvases.forEach((canvas, index) => {
+    const clonedCanvas = clonedCanvases[index];
+    if (!clonedCanvas) return;
+    const signatureImage = document.createElement('img');
+    signatureImage.className = 'sig__canvas';
+    signatureImage.alt = 'Parent or guardian signature';
+    signatureImage.src = canvas.toDataURL('image/png');
+    signatureImage.style.width = '100%';
+    signatureImage.style.height = '170px';
+    signatureImage.style.objectFit = 'contain';
+    signatureImage.style.objectPosition = 'left center';
+    clonedCanvas.replaceWith(signatureImage);
+  });
+
+  // Hide controls that do not belong on a completed paper copy.
+  view.querySelectorAll('.hp,.error,.sig__bar,.submit-row,.phone__menu,.formstatus,.sig__ghost').forEach(el => {
+    el.style.display = 'none';
+  });
+  view.querySelectorAll('input[data-cc-value]').forEach(el => { el.style.display = 'none'; });
+  view.querySelectorAll('.phone__toggle').forEach(el => { el.style.cursor = 'default'; });
+
+  const style = document.createElement('style');
+  style.textContent = `
+    .pdf-export-root, .pdf-export-root * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; animation:none !important; transition:none !important; }
+    .pdf-export-root .page { width:794px !important; max-width:794px !important; margin:0 !important; padding:38px 40px 46px !important; }
+    .pdf-export-root .grid--2 { grid-template-columns:1fr 1fr !important; }
+    .pdf-export-root .fieldset, .pdf-export-root .disclaimer, .pdf-export-root .sig__frame { break-inside:avoid !important; page-break-inside:avoid !important; }
+    .pdf-export-root .field { break-inside:avoid; page-break-inside:avoid; }
+    .pdf-export-root .input, .pdf-export-root .textarea { color:rgba(0,0,0,.70) !important; }
+    .pdf-export-root .view[hidden] { display:block !important; }
+  `;
+  root.appendChild(style);
+  root.appendChild(masthead);
+  page.appendChild(view);
+  root.appendChild(page);
+  if (sourceFooter) {
+    const footer = sourceFooter.cloneNode(true);
+    footer.style.width = '794px';
+    footer.style.boxSizing = 'border-box';
+    root.appendChild(footer);
+  }
+  document.body.appendChild(root);
+
+  try {
+    const worker = window.html2pdf().set({
+      margin: [0, 0, 0, 0],
+      image: { type: 'jpeg', quality: 0.96 },
+      html2canvas: {
+        scale: 1.6,
+        useCORS: true,
+        allowTaint: false,
+        backgroundColor: '#F9F6F4',
+        logging: false,
+        windowWidth: 794,
+        scrollX: 0,
+        scrollY: 0
+      },
+      jsPDF: { unit: 'pt', format: 'a4', orientation: 'portrait', compress: true },
+      pagebreak: { mode: ['css', 'legacy'], avoid: ['.fieldset', '.disclaimer', '.sig__frame', '.field'] }
+    }).from(root).toPdf();
+    const dataUri = await worker.outputPdf('datauristring');
+    const comma = String(dataUri).indexOf(',');
+    if (comma < 0) throw new Error('The completed-form PDF could not be encoded. Please try again.');
+    const base64 = String(dataUri).slice(comma + 1).replace(/\s/g, '');
+    if (!base64 || base64.length < 1000) throw new Error('The completed-form PDF appears to be empty. Please try again.');
+    if (base64.length > 12000000) throw new Error('The completed-form PDF is too large to upload. Please try again from a desktop browser.');
+    return base64;
+  } finally {
+    root.remove();
+  }
+}
+
 Object.keys(PROGRAMMES).forEach(key => {
   const cfg  = PROGRAMMES[key];
   const form = document.getElementById(cfg.form);
@@ -1406,6 +1553,11 @@ Object.keys(PROGRAMMES).forEach(key => {
     };
 
     try {
+      // This PDF is a rendered copy of the actual form customers just completed.
+      btn.textContent = 'Preparing PDF…';
+      payload.pdfBase64 = await buildCompletedFormPdfBase64_(form, cfg);
+      btn.textContent = 'Sending…';
+
       // text/plain keeps this a CORS "simple request" — Apps Script has no OPTIONS handler.
       const res = await fetch(ENDPOINT, {
         method:'POST',
@@ -1428,7 +1580,11 @@ Object.keys(PROGRAMMES).forEach(key => {
 
       location.hash = '#/done';
     } catch (err){
-      showStatus(key, 'We could not send your registration. Check your connection and try again, or call Racket Club reception on +357 26 828000.');
+      const detail = String(err && err.message ? err.message : '');
+      const message = detail.indexOf('PDF renderer') >= 0 || detail.indexOf('PDF export') >= 0 || detail.indexOf('completed-form PDF') >= 0 || detail.indexOf('completed registration form') >= 0
+        ? 'We could not create the PDF copy of the completed form. Please reload the page and try again.'
+        : 'We could not send your registration. Check your connection and try again, or call Racket Club reception on +357 26 828000.';
+      showStatus(key, message);
       console.error(err);
     } finally {
       btn.disabled = false; btn.textContent = label;
