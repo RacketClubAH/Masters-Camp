@@ -975,15 +975,14 @@ input[type="date"].input{min-height:49px}
   <a href="mailto:info@aphroditehills.com">info@aphroditehills.com</a> &nbsp;·&nbsp; <a href="https://aphroditehills.com">aphroditehills.com</a>
 </footer>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js" integrity="sha512-GsLlZN/3F2ErC5ifS5QtgpiJtWd43JWSuIgh7mbzZ8zBps+dvLus+eNQATqgA/HdeKFVgA5v3S/cIrLF7QnIg==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 
 <script>
 /* ==================================================================
    CONFIG — the only two lines you normally edit
    ================================================================== */
-const ENDPOINT   = 'https://script.google.com/macros/s/AKfycbyJ9f0owgezKorvxJBmcJJX3JC3KGkWSddpLpuySyg7WZGHCijLiajjx0Q9Nfo4y3Ut/exec';
+const ENDPOINT   = 'https://script.google.com/macros/s/AKfycbwOZVj2dp6u6FIvtcMcxQIwfiZ2_oEP7RHYRS-KTScT3hh3WOrq52ZIDhI9hd0237kq/exec';
 const FORM_TOKEN = 'MC-FORM-2026';   // Dedicated Masters Camp backend token
-const PDF_ARCHIVE_BUILD_REQUIRED = 'MC-PDF-ARCHIVE-20261018-V4';
+const PDF_ARCHIVE_BUILD_REQUIRED = 'MC-PDF-ARCHIVE-20261018-V5';
 /* ================================================================== */
 
 const COUNTRIES=[
@@ -1378,50 +1377,118 @@ async function verifyPdfArchiveBackend_(){
   return status;
 }
 
-async function ensureHtml2PdfLoaded_(){
-  if (typeof window.html2pdf === 'function') return;
-
-  // Some browsers/networks block one CDN. Try independent mirrors before failing.
-  const mirrors = [
-    'https://cdn.jsdelivr.net/npm/html2pdf.js@0.10.1/dist/html2pdf.bundle.min.js',
-    'https://unpkg.com/html2pdf.js@0.10.1/dist/html2pdf.bundle.min.js'
-  ];
-  const failures = [];
-  for (const src of mirrors){
-    try {
-      await new Promise((resolve, reject) => {
-        const script = document.createElement('script');
-        let settled = false;
-        const finish = (fn, value) => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timeout);
-          script.onload = null;
-          script.onerror = null;
-          fn(value);
-        };
-        const timeout = setTimeout(() => finish(reject, new Error('Timed out loading PDF renderer from ' + new URL(src).hostname)), 12000);
-        script.src = src;
-        script.async = true;
-        script.onload = () => {
-          if (typeof window.html2pdf === 'function') finish(resolve);
-          else finish(reject, new Error('The script loaded but the PDF renderer was unavailable.'));
-        };
-        script.onerror = () => finish(reject, new Error('Could not load PDF renderer from ' + new URL(src).hostname));
-        document.head.appendChild(script);
-      });
-      if (typeof window.html2pdf === 'function') return;
-    } catch (error) {
-      failures.push(error && error.message ? error.message : String(error));
+async function loadScriptCandidate_(url, test, timeoutMs=15000){
+  if (test()) return;
+  await new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    let settled = false;
+    const timeout = setTimeout(() => finish(reject, new Error('Timed out loading ' + new URL(url).hostname)), timeoutMs);
+    function finish(fn, value){
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      script.onload = null;
+      script.onerror = null;
+      if (fn === reject) script.remove();
+      fn(value);
     }
+    script.src = url;
+    script.async = true;
+    script.onload = () => test() ? finish(resolve) : finish(reject, new Error('Script loaded but its API was unavailable at ' + new URL(url).hostname));
+    script.onerror = () => finish(reject, new Error('Could not load ' + new URL(url).hostname));
+    document.head.appendChild(script);
+  });
+}
+
+async function ensurePdfRenderingLibraries_(){
+  const failures = [];
+  if (typeof window.html2canvas !== 'function'){
+    const sources = [
+      'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js',
+      'https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js',
+      'https://unpkg.com/html2canvas@1.4.1/dist/html2canvas.min.js'
+    ];
+    let loaded = false;
+    for (const url of sources){
+      try { await loadScriptCandidate_(url, () => typeof window.html2canvas === 'function'); loaded = true; break; }
+      catch (err) { failures.push(err && err.message ? err.message : String(err)); }
+    }
+    if (!loaded) throw new Error('PDF_RENDERER_UNAVAILABLE: Could not load html2canvas. ' + failures.join(' | '));
   }
-  throw new Error('PDF_RENDERER_UNAVAILABLE: The PDF library could not load from the primary CDN or backup mirrors. Check your internet connection or browser content blocker, then reload. Details: ' + failures.join(' | '));
+  const jsPdfAvailable = () => !!(window.jspdf && typeof window.jspdf.jsPDF === 'function');
+  if (!jsPdfAvailable()){
+    const sources = [
+      'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js',
+      'https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js',
+      'https://unpkg.com/jspdf@2.5.1/dist/jspdf.umd.min.js'
+    ];
+    let loaded = false;
+    for (const url of sources){
+      try { await loadScriptCandidate_(url, jsPdfAvailable); loaded = true; break; }
+      catch (err) { failures.push(err && err.message ? err.message : String(err)); }
+    }
+    if (!loaded) throw new Error('PDF_RENDERER_UNAVAILABLE: Could not load jsPDF. ' + failures.join(' | '));
+  }
+}
+
+function canvasToPaginatedPdfDataUri_(canvas, root){
+  const JsPDF = window.jspdf && window.jspdf.jsPDF;
+  if (typeof JsPDF !== 'function') throw new Error('PDF_RENDERER_UNAVAILABLE: jsPDF was not available after loading.');
+  const pdf = new JsPDF({ unit:'pt', format:'a4', orientation:'portrait', compress:true, putOnlyUsedFonts:true });
+  const pageWidth = pdf.internal.pageSize.getWidth();
+  const pageHeight = pdf.internal.pageSize.getHeight();
+  const marginX = 34;
+  const marginTop = 34;
+  const marginBottom = 34;
+  const imageWidthPt = pageWidth - marginX * 2;
+  const maxImageHeightPt = pageHeight - marginTop - marginBottom;
+  const pxToPt = imageWidthPt / canvas.width;
+  const maxChunkPx = Math.max(400, Math.floor(maxImageHeightPt / pxToPt));
+
+  // Prefer page breaks after a completed fieldset, so field groups are not split when space permits.
+  const rootTop = root.getBoundingClientRect().top;
+  const scale = canvas.width / Math.max(1, root.getBoundingClientRect().width);
+  const breakYs = Array.from(root.querySelectorAll('fieldset.fieldset'))
+    .map(el => Math.round((el.getBoundingClientRect().bottom - rootTop) * scale))
+    .filter(y => Number.isFinite(y) && y > 0 && y < canvas.height)
+    .sort((a,b) => a-b);
+
+  let y = 0;
+  let pageIndex = 0;
+  while (y < canvas.height){
+    const hardEnd = Math.min(canvas.height, y + maxChunkPx);
+    let endY = hardEnd;
+    if (hardEnd < canvas.height){
+      const minAcceptable = y + Math.floor(maxChunkPx * 0.58);
+      const candidates = breakYs.filter(b => b > minAcceptable && b <= hardEnd);
+      if (candidates.length) endY = candidates[candidates.length - 1];
+    }
+    if (endY <= y) endY = Math.min(canvas.height, y + maxChunkPx);
+
+    const sliceHeight = endY - y;
+    const slice = document.createElement('canvas');
+    slice.width = canvas.width;
+    slice.height = sliceHeight;
+    const ctx = slice.getContext('2d');
+    if (!ctx) throw new Error('Could not prepare a PDF page image.');
+    ctx.fillStyle = '#F9F6F4';
+    ctx.fillRect(0,0,slice.width,slice.height);
+    ctx.drawImage(canvas, 0, y, canvas.width, sliceHeight, 0, 0, canvas.width, sliceHeight);
+    const pageImage = slice.toDataURL('image/jpeg', 0.92);
+    if (pageIndex > 0) pdf.addPage();
+    const imageHeightPt = sliceHeight * pxToPt;
+    pdf.addImage(pageImage, 'JPEG', marginX, marginTop, imageWidthPt, imageHeightPt, undefined, 'FAST');
+    y = endY;
+    pageIndex++;
+    slice.width = 1; slice.height = 1;
+  }
+  return pdf.output('datauristring');
 }
 
 async function buildCompletedFormPdfBase64_(form, cfg){
-  await ensureHtml2PdfLoaded_();
-  if (typeof window.html2pdf !== 'function') {
-    throw new Error('PDF_RENDERER_UNAVAILABLE: The PDF renderer did not load.');
+  await ensurePdfRenderingLibraries_();
+  if (typeof window.html2canvas !== 'function' || !(window.jspdf && typeof window.jspdf.jsPDF === 'function')) {
+    throw new Error('PDF_RENDERER_UNAVAILABLE: The PDF rendering libraries did not initialize.');
   }
   try { if (document.fonts && document.fonts.ready) await document.fonts.ready; } catch (_) {}
 
@@ -1432,7 +1499,7 @@ async function buildCompletedFormPdfBase64_(form, cfg){
 
   const root = document.createElement('div');
   root.className = 'pdf-export-root';
-  root.style.cssText = 'position:fixed;left:0;top:0;width:794px;max-width:794px;min-height:1123px;z-index:2147483647;overflow:visible;pointer-events:none;background:#F9F6F4;color:rgba(0,0,0,.70);';
+  root.style.cssText = 'position:fixed;left:0;top:0;width:794px;max-width:794px;min-height:1123px;height:auto;display:block;visibility:visible;opacity:1;transform:none;z-index:2147483647;overflow:visible;pointer-events:none;background:#F9F6F4;color:rgba(0,0,0,.70);';
 
   const masthead = sourceHeader.cloneNode(true);
   masthead.style.width = '794px';
@@ -1510,7 +1577,6 @@ async function buildCompletedFormPdfBase64_(form, cfg){
 
   const style = document.createElement('style');
   style.textContent = `
-    body[data-pdf-rendering="true"] > :not(.pdf-export-root) { visibility:hidden !important; }
     .pdf-export-root, .pdf-export-root * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; animation:none !important; transition:none !important; }
     .pdf-export-root .page { width:794px !important; max-width:794px !important; margin:0 !important; padding:38px 40px 46px !important; }
     .pdf-export-root .grid--2 { grid-template-columns:1fr 1fr !important; }
@@ -1529,7 +1595,6 @@ async function buildCompletedFormPdfBase64_(form, cfg){
     footer.style.boxSizing = 'border-box';
     root.appendChild(footer);
   }
-  document.body.setAttribute('data-pdf-rendering', 'true');
   document.body.appendChild(root);
 
   try {
@@ -1543,50 +1608,54 @@ async function buildCompletedFormPdfBase64_(form, cfg){
       });
     }));
     await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-    const options = {
-      margin: [0, 0, 0, 0],
-      image: { type: 'jpeg', quality: 0.96 },
-      html2canvas: {
-        scale: 1.6,
-        useCORS: true,
-        allowTaint: false,
-        backgroundColor: '#F9F6F4',
-        logging: false,
-        windowWidth: 794,
-        windowHeight: Math.max(window.innerHeight || 1123, 1123),
-        scrollX: 0,
-        scrollY: 0
-      },
-      jsPDF: { unit: 'pt', format: 'a4', orientation: 'portrait', compress: true },
-      pagebreak: { mode: ['css', 'legacy'], avoid: ['.fieldset', '.disclaimer', '.sig__frame', '.field'] }
-    };
-    // Render first, then check the captured canvas has real content before creating the PDF.
-    // The earlier negative z-index allowed the PDF canvas to capture the page background only.
-    let worker = window.html2pdf().set(options).from(root).toCanvas();
-    await worker;
-    const renderedCanvas = await worker.get('canvas');
-    if (!renderedCanvas || renderedCanvas.width < 500 || renderedCanvas.height < 500) {
-      throw new Error('The completed-form PDF render canvas has invalid dimensions. Please reload and retry.');
+    const rootRect = root.getBoundingClientRect();
+    const cssWidth = Math.ceil(rootRect.width || root.scrollWidth || root.offsetWidth || 0);
+    const cssHeight = Math.ceil(rootRect.height || root.scrollHeight || root.offsetHeight || 0);
+    if (cssWidth < 500 || cssHeight < 500) {
+      throw new Error('PDF_RENDER_LAYOUT_INVALID: The completed form layout measured ' + cssWidth + ' × ' + cssHeight + ' CSS pixels before capture.');
     }
+
+    // Use html2canvas directly instead of html2pdf's Worker.toCanvas() path. This avoids
+    // the Worker canvas hand-off that produced invalid/zero-sized canvases in some browsers.
+    const renderedCanvas = await window.html2canvas(root, {
+      scale: 1.25,
+      useCORS: true,
+      allowTaint: false,
+      backgroundColor: '#F9F6F4',
+      logging: false,
+      width: cssWidth,
+      height: cssHeight,
+      windowWidth: 794,
+      windowHeight: Math.max(window.innerHeight || 1123, cssHeight, 1123),
+      scrollX: 0,
+      scrollY: 0,
+      imageTimeout: 15000,
+      removeContainer: true
+    });
+    if (!renderedCanvas || renderedCanvas.width < 500 || renderedCanvas.height < 500) {
+      const cw = renderedCanvas && renderedCanvas.width || 0;
+      const ch = renderedCanvas && renderedCanvas.height || 0;
+      throw new Error('PDF_RENDER_CANVAS_INVALID: The render canvas measured ' + cw + ' × ' + ch + ' pixels (layout ' + cssWidth + ' × ' + cssHeight + ').');
+    }
+
     const ctx = renderedCanvas.getContext('2d', { willReadFrequently: true });
-    const imageData = ctx.getImageData(0, 0, renderedCanvas.width, renderedCanvas.height).data;
+    if (!ctx) throw new Error('PDF_RENDER_CANVAS_INVALID: The render canvas has no 2D context.');
+    const sample = ctx.getImageData(0, 0, renderedCanvas.width, renderedCanvas.height).data;
     let contentPixels = 0;
-    // Ignore the masthead area; the completed form body must contain visible text/field details too.
-    const startY = Math.min(Math.round(170 * 1.6), Math.floor(renderedCanvas.height * 0.25));
-    for (let y = startY; y < renderedCanvas.height; y += 7) {
+    const startY = Math.min(Math.round(150 * 1.25), Math.floor(renderedCanvas.height * 0.20));
+    for (let y = startY; y < renderedCanvas.height; y += 6) {
       const row = y * renderedCanvas.width * 4;
-      for (let x = 0; x < renderedCanvas.width; x += 7) {
+      for (let x = 0; x < renderedCanvas.width; x += 6) {
         const i = row + x * 4;
-        const r = imageData[i], g = imageData[i+1], b = imageData[i+2], a = imageData[i+3];
-        // The page background is #F9F6F4. Count only strong text/brand/detail pixels, not pale paper fill.
-        if (a > 0 && (r < 185 || g < 185 || b < 185)) contentPixels++;
+        const r = sample[i], g = sample[i+1], b = sample[i+2], a = sample[i+3];
+        if (a > 0 && (r < 195 || g < 195 || b < 195)) contentPixels++;
       }
     }
     if (contentPixels < 300) {
-      throw new Error('PDF_RENDER_EMPTY: The completed form body rendered blank. Nothing was submitted.');
+      throw new Error('PDF_RENDER_EMPTY: The form rendered but no readable form content was detected. Layout ' + cssWidth + ' × ' + cssHeight + ', canvas ' + renderedCanvas.width + ' × ' + renderedCanvas.height + '.');
     }
-    worker = worker.toPdf();
-    const dataUri = await worker.outputPdf('datauristring');
+
+    const dataUri = canvasToPaginatedPdfDataUri_(renderedCanvas, root);
     const comma = String(dataUri).indexOf(',');
     if (comma < 0) throw new Error('The completed-form PDF could not be encoded. Please try again.');
     const base64 = String(dataUri).slice(comma + 1).replace(/\s/g, '');
@@ -1595,7 +1664,6 @@ async function buildCompletedFormPdfBase64_(form, cfg){
     return base64;
   } finally {
     root.remove();
-    document.body.removeAttribute('data-pdf-rendering');
   }
 }
 
@@ -1691,7 +1759,7 @@ Object.keys(PROGRAMMES).forEach(key => {
         message = 'The server did not confirm the saved PDF. Do not submit again yet; ask reception to check the Masters Camp records first.';
       } else if (detail.indexOf('PDF_RENDERER_UNAVAILABLE') === 0) {
         message = 'The PDF tool could not load, so no registration was submitted. Check that this browser can access cdnjs/jsDelivr, disable content blocking for this page if applicable, then reload and try again.';
-      } else if (detail.indexOf('PDF renderer') >= 0 || detail.indexOf('PDF export') >= 0 || detail.indexOf('completed-form PDF') >= 0 || detail.indexOf('completed registration form') >= 0 || detail.indexOf('PDF_RENDER_EMPTY') >= 0) {
+      } else if (detail.indexOf('PDF_RENDER_') === 0 || detail.indexOf('PDF_RENDERER_UNAVAILABLE') === 0 || detail.indexOf('PDF renderer') >= 0 || detail.indexOf('PDF export') >= 0 || detail.indexOf('completed-form PDF') >= 0 || detail.indexOf('completed registration form') >= 0) {
         console.error('Masters Camp PDF generation failed:', err);
         message = 'We could not create the PDF copy of the completed form. No registration was submitted. Technical detail: ' + (detail || 'Unknown PDF rendering error').slice(0, 220) + '. Please reload the page and try again.';
       } else {
