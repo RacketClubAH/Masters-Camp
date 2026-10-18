@@ -981,9 +981,9 @@ input[type="date"].input{min-height:49px}
 /* ==================================================================
    CONFIG — the only two lines you normally edit
    ================================================================== */
-const ENDPOINT   = 'https://script.google.com/macros/s/AKfycbzjjOSlJk8A6q90rfFVDqsLFv-jahm9taz7fpFCKKAauaUHdOENoFYeVXYk6sGr97CW/exec';
+const ENDPOINT   = 'https://script.google.com/macros/s/AKfycbw8caVsJrat6CFqfXBQWfoDYfo4SVqaBiEospZ-4Y2QjuKJ6Y86qYa4knvv57838etZ/exec';
 const FORM_TOKEN = 'MC-FORM-2026';   // Dedicated Masters Camp backend token
-const PDF_ARCHIVE_BUILD_REQUIRED = 'MC-PDF-ARCHIVE-20261018-V2';
+const PDF_ARCHIVE_BUILD_REQUIRED = 'MC-PDF-ARCHIVE-20261018-V3';
 /* ================================================================== */
 
 const COUNTRIES=[
@@ -1378,9 +1378,50 @@ async function verifyPdfArchiveBackend_(){
   return status;
 }
 
+async function ensureHtml2PdfLoaded_(){
+  if (typeof window.html2pdf === 'function') return;
+
+  // Some browsers/networks block one CDN. Try independent mirrors before failing.
+  const mirrors = [
+    'https://cdn.jsdelivr.net/npm/html2pdf.js@0.10.1/dist/html2pdf.bundle.min.js',
+    'https://unpkg.com/html2pdf.js@0.10.1/dist/html2pdf.bundle.min.js'
+  ];
+  const failures = [];
+  for (const src of mirrors){
+    try {
+      await new Promise((resolve, reject) => {
+        const script = document.createElement('script');
+        let settled = false;
+        const finish = (fn, value) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeout);
+          script.onload = null;
+          script.onerror = null;
+          fn(value);
+        };
+        const timeout = setTimeout(() => finish(reject, new Error('Timed out loading PDF renderer from ' + new URL(src).hostname)), 12000);
+        script.src = src;
+        script.async = true;
+        script.onload = () => {
+          if (typeof window.html2pdf === 'function') finish(resolve);
+          else finish(reject, new Error('The script loaded but the PDF renderer was unavailable.'));
+        };
+        script.onerror = () => finish(reject, new Error('Could not load PDF renderer from ' + new URL(src).hostname));
+        document.head.appendChild(script);
+      });
+      if (typeof window.html2pdf === 'function') return;
+    } catch (error) {
+      failures.push(error && error.message ? error.message : String(error));
+    }
+  }
+  throw new Error('PDF_RENDERER_UNAVAILABLE: The PDF library could not load from the primary CDN or backup mirrors. Check your internet connection or browser content blocker, then reload. Details: ' + failures.join(' | '));
+}
+
 async function buildCompletedFormPdfBase64_(form, cfg){
+  await ensureHtml2PdfLoaded_();
   if (typeof window.html2pdf !== 'function') {
-    throw new Error('The PDF renderer did not load. Please reload the registration form and try again.');
+    throw new Error('PDF_RENDERER_UNAVAILABLE: The PDF renderer did not load.');
   }
   try { if (document.fonts && document.fonts.ready) await document.fonts.ready; } catch (_) {}
 
@@ -1490,6 +1531,16 @@ async function buildCompletedFormPdfBase64_(form, cfg){
   document.body.appendChild(root);
 
   try {
+    // Ensure logos and the signature image are ready before html2canvas rasterizes the clone.
+    await Promise.all(Array.from(root.querySelectorAll('img')).map(img => {
+      if (img.complete && img.naturalWidth > 0) return Promise.resolve();
+      if (typeof img.decode === 'function') return img.decode().catch(() => undefined);
+      return new Promise(resolve => {
+        img.onload = resolve;
+        img.onerror = resolve;
+      });
+    }));
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     const worker = window.html2pdf().set({
       margin: [0, 0, 0, 0],
       image: { type: 'jpeg', quality: 0.96 },
@@ -1608,8 +1659,11 @@ Object.keys(PROGRAMMES).forEach(key => {
         message = 'Registration was not submitted because the PDF archive backend is not updated. Reception must update and redeploy the Masters Camp Apps Script before trying again.';
       } else if (detail === 'PDF_NOT_CONFIRMED') {
         message = 'The server did not confirm the saved PDF. Do not submit again yet; ask reception to check the Masters Camp records first.';
+      } else if (detail.indexOf('PDF_RENDERER_UNAVAILABLE') === 0) {
+        message = 'The PDF tool could not load, so no registration was submitted. Check that this browser can access cdnjs/jsDelivr, disable content blocking for this page if applicable, then reload and try again.';
       } else if (detail.indexOf('PDF renderer') >= 0 || detail.indexOf('PDF export') >= 0 || detail.indexOf('completed-form PDF') >= 0 || detail.indexOf('completed registration form') >= 0) {
-        message = 'We could not create the PDF copy of the completed form. No registration was submitted. Please reload the page and try again.';
+        console.error('Masters Camp PDF generation failed:', err);
+        message = 'We could not create the PDF copy of the completed form. No registration was submitted. Technical detail: ' + (detail || 'Unknown PDF rendering error').slice(0, 220) + '. Please reload the page and try again.';
       } else {
         message = 'We could not send your registration. Check your connection and try again, or call Racket Club reception on +357 26 828000.';
       }
