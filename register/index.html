@@ -980,9 +980,9 @@ input[type="date"].input{min-height:49px}
 /* ==================================================================
    CONFIG — the only two lines you normally edit
    ================================================================== */
-const ENDPOINT   = 'https://script.google.com/macros/s/AKfycbwOZVj2dp6u6FIvtcMcxQIwfiZ2_oEP7RHYRS-KTScT3hh3WOrq52ZIDhI9hd0237kq/exec';
+const ENDPOINT   = 'https://script.google.com/macros/s/AKfycbx0leV91Rf_Nc_P68RbpEI4r2wLM_lISzgDwyCwiTv-g60S8pivTpW4NvbdK9Am9lRY/exec';
 const FORM_TOKEN = 'MC-FORM-2026';   // Dedicated Masters Camp backend token
-const PDF_ARCHIVE_BUILD_REQUIRED = 'MC-PDF-ARCHIVE-20261018-V5';
+const PDF_ARCHIVE_BUILD_REQUIRED = 'MC-PDF-ARCHIVE-20261018-V7';
 /* ================================================================== */
 
 const COUNTRIES=[
@@ -1347,6 +1347,47 @@ function validate(form, key){
 
 /* --------------------- submission -------------------------- */
 const openedAt = Date.now();
+const pendingSubmissionIds = Object.create(null);
+function submissionIdFor_(key){
+  if (!pendingSubmissionIds[key]) {
+    pendingSubmissionIds[key] = (window.crypto && typeof window.crypto.randomUUID === 'function')
+      ? window.crypto.randomUUID()
+      : ('mc-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2));
+  }
+  return pendingSubmissionIds[key];
+}
+
+async function lookupSubmissionStatus_(submissionId){
+  const response = await fetch(ENDPOINT, {
+    method:'POST',
+    headers:{'Content-Type':'text/plain;charset=utf-8'},
+    body:JSON.stringify({token:FORM_TOKEN, action:'getRegistrationStatus', submissionId}),
+    redirect:'follow'
+  });
+  const text = await response.text();
+  let data;
+  try { data = JSON.parse(text); } catch (_) { throw new Error('The server status check did not return JSON.'); }
+  if (!data || data.ok !== true) throw new Error(data && data.error ? data.error : 'Registration status could not be checked.');
+  return data.found === true ? data.result : null;
+}
+
+function showRegistrationSuccess_(key, form, fields, data){
+  // The server has confirmed the registration. UI reset errors must never turn this into a failure message.
+  try {
+    const player = ((fields.childFirstName || '') + ' ' + (fields.childLastName || '')).trim();
+    const doneTitle = $('#done-title'), donePlayer = $('#done-player'), doneId = $('#done-id');
+    if (doneTitle) doneTitle.textContent = 'Thank you, ' + (fields.guardian1 || fields.firstName || 'there').split(' ')[0] + '.';
+    if (donePlayer) donePlayer.textContent = player;
+    if (doneId) doneId.textContent = data.id || '';
+    form.reset();
+    if (sigPads[PROGRAMMES[key].sig]) sigPads[PROGRAMMES[key].sig].clear();
+    $$('[data-clears]').forEach(b => { const target = document.getElementById(b.dataset.clears); if (target) target.disabled = false; });
+  } catch (uiErr) {
+    console.warn('Registration was saved, but the local confirmation page needed recovery:', uiErr);
+  }
+  pendingSubmissionIds[key] = '';
+  location.hash = '#/done';
+}
 
 function showStatus(key, text){
   const el = document.getElementById(PROGRAMMES[key].status);
@@ -1371,7 +1412,7 @@ async function verifyPdfArchiveBackend_(){
     redirect: 'follow'
   });
   const status = await response.json();
-  if (!status || status.ok !== true || status.pdfArchiveBuild !== PDF_ARCHIVE_BUILD_REQUIRED || status.pdfUploadEnabled !== true) {
+  if (!status || status.ok !== true || status.pdfArchiveBuild !== PDF_ARCHIVE_BUILD_REQUIRED || status.pdfUploadEnabled !== true || status.pdfStatusLookupEnabled !== true) {
     throw new Error('PDF_BACKEND_NOT_UPDATED');
   }
   return status;
@@ -1499,7 +1540,7 @@ async function buildCompletedFormPdfBase64_(form, cfg){
 
   const root = document.createElement('div');
   root.className = 'pdf-export-root';
-  root.style.cssText = 'position:fixed;left:0;top:0;width:794px;max-width:794px;min-height:1123px;height:auto;display:block;visibility:visible;opacity:1;transform:none;z-index:2147483647;overflow:visible;pointer-events:none;background:#F9F6F4;color:rgba(0,0,0,.70);';
+  root.style.cssText = 'position:absolute;left:0;top:0;width:794px;max-width:794px;min-height:0;height:auto;display:block;visibility:visible;opacity:1;transform:none;z-index:2147483647;overflow:visible;pointer-events:none;background:#F9F6F4;color:rgba(0,0,0,.70);';
 
   const masthead = sourceHeader.cloneNode(true);
   masthead.style.width = '794px';
@@ -1535,31 +1576,31 @@ async function buildCompletedFormPdfBase64_(form, cfg){
       return;
     }
 
-    const isChoice = source.type === 'checkbox' || source.type === 'radio';
-    const valueEl = document.createElement(isChoice ? 'span' : 'div');
+    const valueEl = document.createElement(source.type === 'checkbox' || source.type === 'radio' ? 'span' : 'div');
     valueEl.className = (target.className || '') + ' pdf-field-value';
+    valueEl.removeAttribute('id');
+    valueEl.removeAttribute('name');
+    valueEl.removeAttribute('role');
     valueEl.style.boxSizing = 'border-box';
 
     if (source.tagName === 'SELECT') {
-      const selected = Array.from(source.selectedOptions || [])
-        .map(option => (option.textContent || '').trim())
-        .filter(Boolean);
+      const selected = Array.from(source.selectedOptions || []).map(option => (option.textContent || '').trim()).filter(Boolean);
       valueEl.classList.add('pdf-select-value');
       valueEl.textContent = selected.join(', ') || '\u00a0';
       valueEl.setAttribute('aria-label', selected.join(', ') || 'No selection');
-    } else if (isChoice) {
+    } else if (source.type === 'checkbox' || source.type === 'radio') {
       valueEl.className = 'pdf-choice-mark' + (source.checked ? ' is-checked' : '') + (source.type === 'radio' ? ' is-radio' : '');
       valueEl.textContent = source.checked ? (source.type === 'radio' ? '●' : '✓') : '';
       valueEl.setAttribute('aria-label', source.checked ? 'Selected' : 'Not selected');
     } else {
-      const value = source.value || '';
+      let value = source.value || '';
+      // Keep date values consistent with the visible form; preserve entered text exactly.
       valueEl.classList.add('pdf-text-value');
       valueEl.textContent = value.length ? value : '\u00a0';
       valueEl.setAttribute('aria-label', value || 'Blank');
     }
 
-    // Replace native controls: html2canvas clips some native input/select text.
-    // Static elements wrap naturally and do not have an internal control viewport.
+    // Do not carry browser-only control dimensions/scrolling into the PDF clone.
     valueEl.style.height = 'auto';
     valueEl.style.maxHeight = 'none';
     valueEl.style.minWidth = '0';
@@ -1574,9 +1615,10 @@ async function buildCompletedFormPdfBase64_(form, cfg){
     if (source.tagName === 'TEXTAREA') {
       valueEl.style.minHeight = '96px';
       valueEl.style.lineHeight = '1.55';
-    } else if (!isChoice) {
+    } else if (source.type !== 'checkbox' && source.type !== 'radio') {
       valueEl.style.minHeight = '49px';
-      valueEl.style.display = 'block';
+      valueEl.style.display = 'flex';
+      valueEl.style.alignItems = 'center';
     }
     target.replaceWith(valueEl);
   });
@@ -1614,9 +1656,9 @@ async function buildCompletedFormPdfBase64_(form, cfg){
     .pdf-export-root .field { break-inside:avoid; page-break-inside:avoid; }
     .pdf-export-root .input, .pdf-export-root .textarea { color:rgba(0,0,0,.70) !important; }
     .pdf-export-root .pdf-field-value { box-sizing:border-box !important; width:100% !important; height:auto !important; max-height:none !important; overflow:visible !important; text-overflow:clip !important; white-space:normal !important; overflow-wrap:anywhere !important; word-break:normal !important; box-shadow:none !important; transition:none !important; }
-    .pdf-export-root .pdf-field-value.input { display:block !important; min-height:49px !important; line-height:1.45 !important; padding:11px 14px !important; }
+    .pdf-export-root .pdf-field-value.input { display:flex !important; align-items:center !important; min-height:49px !important; line-height:1.45 !important; padding:11px 14px !important; }
     .pdf-export-root .pdf-field-value.textarea { display:block !important; min-height:96px !important; padding:13px 14px !important; white-space:pre-wrap !important; line-height:1.55 !important; }
-    .pdf-export-root .pdf-field-value.input.pdf-select-value { display:block !important; min-height:49px !important; padding:12px 14px !important; line-height:1.45 !important; }
+    .pdf-export-root .pdf-select-value { display:block !important; min-height:49px !important; padding:12px 14px !important; line-height:1.45 !important; }
     .pdf-export-root .pdf-choice-mark { box-sizing:border-box !important; display:inline-grid !important; place-items:center !important; width:20px !important; height:20px !important; min-width:20px !important; min-height:20px !important; border:1px solid var(--bronze) !important; border-radius:2px !important; color:var(--foam) !important; background:#fff !important; font:500 13px/1 Arial,sans-serif !important; align-self:start !important; }
     .pdf-export-root .pdf-choice-mark.is-checked { background:var(--mple) !important; border-color:var(--mple) !important; }
     .pdf-export-root .pdf-choice-mark.is-radio { border-radius:50% !important; color:var(--mple) !important; background:#fff !important; font-size:10px !important; }
@@ -1647,11 +1689,25 @@ async function buildCompletedFormPdfBase64_(form, cfg){
       });
     }));
     await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    // Fixed-position auto-height containers can report only viewport height in some browsers.
+    // Measure each content block independently and use the greatest real content height.
     const rootRect = root.getBoundingClientRect();
-    const cssWidth = Math.ceil(rootRect.width || root.scrollWidth || root.offsetWidth || 0);
-    const cssHeight = Math.ceil(rootRect.height || root.scrollHeight || root.offsetHeight || 0);
-    if (cssWidth < 500 || cssHeight < 500) {
-      throw new Error('PDF_RENDER_LAYOUT_INVALID: The completed form layout measured ' + cssWidth + ' × ' + cssHeight + ' CSS pixels before capture.');
+    const elementHeight_ = el => !el ? 0 : Math.ceil(Math.max(
+      el.scrollHeight || 0,
+      el.offsetHeight || 0,
+      (el.getBoundingClientRect && el.getBoundingClientRect().height) || 0
+    ));
+    const cssWidth = Math.ceil(Math.max(rootRect.width || 0, root.scrollWidth || 0, root.offsetWidth || 0));
+    const mastheadHeight = elementHeight_(masthead);
+    const pageHeight = elementHeight_(page);
+    const footerHeight = elementHeight_(root.querySelector('.footer'));
+    const expectedFullHeight = mastheadHeight + pageHeight + footerHeight;
+    const cssHeight = Math.ceil(Math.max(expectedFullHeight, root.scrollHeight || 0, root.offsetHeight || 0, rootRect.height || 0));
+    // Give html2canvas an explicit full-content box, not a possibly viewport-sized box.
+    root.style.height = cssHeight + 'px';
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    if (cssWidth < 500 || cssHeight < 900 || pageHeight < 700 || cssHeight < expectedFullHeight - 20) {
+      throw new Error('PDF_RENDER_LAYOUT_INVALID: Full form measurement was ' + cssWidth + ' × ' + cssHeight + ' CSS pixels (header ' + mastheadHeight + ', form page ' + pageHeight + ', footer ' + footerHeight + ').');
     }
 
     // Use html2canvas directly instead of html2pdf's Worker.toCanvas() path. This avoids
@@ -1730,6 +1786,10 @@ Object.keys(PROGRAMMES).forEach(key => {
     const btn = form.querySelector('button[type="submit"]');
     const label = btn.textContent;
     btn.disabled = true; btn.textContent = 'Sending…';
+    const submissionId = submissionIdFor_(key);
+    let postAttempted = false;
+    let serverRejectedMessage = '';
+    let acceptedData = null;
 
     const fields = {};
     new FormData(form).forEach((v, k) => { if (k !== 'company') fields[k] = String(v).trim(); });
@@ -1749,6 +1809,7 @@ Object.keys(PROGRAMMES).forEach(key => {
     const payload = {
       token: FORM_TOKEN,
       programme: key,
+      submissionId: submissionId,
       elapsedMs: Date.now() - openedAt,
       hp: form.elements.company.value,
       fields,
@@ -1766,43 +1827,74 @@ Object.keys(PROGRAMMES).forEach(key => {
       btn.textContent = 'Sending…';
 
       // text/plain keeps this a CORS "simple request" — Apps Script has no OPTIONS handler.
+      // Include a stable submission ID so the server can deduplicate and reconcile a lost response.
+      postAttempted = true;
       const res = await fetch(ENDPOINT, {
         method:'POST',
         headers:{ 'Content-Type':'text/plain;charset=utf-8' },
         body: JSON.stringify(payload),
         redirect:'follow'
       });
-      const data = await res.json();
-      if (!data.ok) throw new Error(data.error || 'Unknown error');
+      const responseText = await res.text();
+      let data;
+      try { data = JSON.parse(responseText); }
+      catch (_) { throw new Error('REGISTRATION_RESPONSE_UNREADABLE: the server response was not valid JSON.'); }
+      if (!data.ok) {
+        serverRejectedMessage = String(data.error || 'The server rejected the registration.');
+        throw new Error('SERVER_REJECTED: ' + serverRejectedMessage);
+      }
       if (data.pdfSaved !== true || typeof data.pdfUrl !== 'string' || !data.pdfUrl.trim()) {
         throw new Error('PDF_NOT_CONFIRMED');
       }
-
-      const player = ((fields.firstName || fields.childFirstName || '') + ' ' +
-                      (fields.lastName  || fields.childLastName  || '')).trim();
-      $('#done-title').textContent = 'Thank you, ' + (fields.firstName || fields.guardian1 || '').split(' ')[0] + '.';
-      $('#done-player').textContent = player;
-      $('#done-id').textContent = data.id;
-
-      form.reset();
-      sigPads[cfg.sig].clear();
-      $$('[data-clears]').forEach(b => { document.getElementById(b.dataset.clears).disabled = false; });
-
-      location.hash = '#/done';
+      acceptedData = data;
+      showRegistrationSuccess_(key, form, fields, data);
     } catch (err){
       const detail = String(err && err.message ? err.message : '');
+      // If the server already accepted the registration, never show a submission failure because
+      // of a local UI issue. Otherwise reconcile after any request whose response was interrupted.
+      if (acceptedData) {
+        console.error('Registration was saved; suppressing a post-success UI error:', err);
+        showRegistrationSuccess_(key, form, fields, acceptedData);
+        return;
+      }
+
+      if (postAttempted) {
+        btn.textContent = 'Confirming registration…';
+        try {
+          const recovered = await lookupSubmissionStatus_(submissionId);
+          if (recovered && recovered.ok === true && recovered.pdfSaved === true && recovered.pdfUrl) {
+            showRegistrationSuccess_(key, form, fields, recovered);
+            return;
+          }
+          if (serverRejectedMessage) {
+            showStatus(key, 'Registration was not submitted: ' + serverRejectedMessage);
+            console.warn('Masters Camp registration rejected by backend:', serverRejectedMessage);
+            return;
+          }
+          if (detail === 'PDF_NOT_CONFIRMED') {
+            showStatus(key, 'We could not confirm the PDF link, and no saved registration was found yet. Please contact reception before submitting again.');
+            return;
+          }
+          showStatus(key, 'The server did not find a completed registration for this attempt. You may try again; this page will reuse the same attempt ID to prevent duplicates.');
+          console.error('Registration request had no confirmed result:', err);
+          return;
+        } catch (statusError) {
+          console.error('Could not reconcile registration status:', statusError, err);
+          showStatus(key, 'Your registration may already have been saved, but the confirmation was interrupted. Please do not submit again yet. Ask reception to check the Masters Camp Players sheet before retrying.');
+          return;
+        }
+      }
+
       let message;
       if (detail === 'PDF_BACKEND_NOT_UPDATED') {
         message = 'Registration was not submitted because the PDF archive backend is not updated. Reception must update and redeploy the Masters Camp Apps Script before trying again.';
-      } else if (detail === 'PDF_NOT_CONFIRMED') {
-        message = 'The server did not confirm the saved PDF. Do not submit again yet; ask reception to check the Masters Camp records first.';
       } else if (detail.indexOf('PDF_RENDERER_UNAVAILABLE') === 0) {
         message = 'The PDF tool could not load, so no registration was submitted. Check that this browser can access cdnjs/jsDelivr, disable content blocking for this page if applicable, then reload and try again.';
       } else if (detail.indexOf('PDF_RENDER_') === 0 || detail.indexOf('PDF_RENDERER_UNAVAILABLE') === 0 || detail.indexOf('PDF renderer') >= 0 || detail.indexOf('PDF export') >= 0 || detail.indexOf('completed-form PDF') >= 0 || detail.indexOf('completed registration form') >= 0) {
         console.error('Masters Camp PDF generation failed:', err);
         message = 'We could not create the PDF copy of the completed form. No registration was submitted. Technical detail: ' + (detail || 'Unknown PDF rendering error').slice(0, 220) + '. Please reload the page and try again.';
       } else {
-        message = 'We could not send your registration. Check your connection and try again, or call Racket Club reception on +357 26 828000.';
+        message = 'We could not send your registration: ' + (detail || 'Unknown error') + '. Please check the details and try again.';
       }
       showStatus(key, message);
       console.error(err);
