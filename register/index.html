@@ -975,14 +975,15 @@ input[type="date"].input{min-height:49px}
   <a href="mailto:info@aphroditehills.com">info@aphroditehills.com</a> &nbsp;·&nbsp; <a href="https://aphroditehills.com">aphroditehills.com</a>
 </footer>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.11.3/html2pdf.bundle.min.js" crossorigin="anonymous"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js" integrity="sha512-GsLlZN/3F2ErC5ifS5QtgpiJtWd43JWSuIgh7mbzZ8zBps+dvLus+eNQATqgA/HdeKFVgA5v3S/cIrLF7QnIg==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 
 <script>
 /* ==================================================================
    CONFIG — the only two lines you normally edit
    ================================================================== */
-const ENDPOINT   = 'https://script.google.com/macros/s/AKfycbymDe2iJiJ076GnZvhruhiwsQgXWGYnbcjzBVWDpBrolX326PZclAZNVSorXDQlryUN/exec';
+const ENDPOINT   = 'https://script.google.com/macros/s/AKfycbzjjOSlJk8A6q90rfFVDqsLFv-jahm9taz7fpFCKKAauaUHdOENoFYeVXYk6sGr97CW/exec';
 const FORM_TOKEN = 'MC-FORM-2026';   // Dedicated Masters Camp backend token
+const PDF_ARCHIVE_BUILD_REQUIRED = 'MC-PDF-ARCHIVE-20261018-V2';
 /* ================================================================== */
 
 const COUNTRIES=[
@@ -1363,6 +1364,20 @@ function hideStatus(key){
  * designed summary. The page's own HTML/CSS, selected options, entered values,
  * consent language, and the actual signature canvas are copied into the export.
  */
+async function verifyPdfArchiveBackend_(){
+  const response = await fetch(ENDPOINT, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify({ token: FORM_TOKEN, action: 'pdfArchiveStatus' }),
+    redirect: 'follow'
+  });
+  const status = await response.json();
+  if (!status || status.ok !== true || status.pdfArchiveBuild !== PDF_ARCHIVE_BUILD_REQUIRED || status.pdfUploadEnabled !== true) {
+    throw new Error('PDF_BACKEND_NOT_UPDATED');
+  }
+  return status;
+}
+
 async function buildCompletedFormPdfBase64_(form, cfg){
   if (typeof window.html2pdf !== 'function') {
     throw new Error('The PDF renderer did not load. Please reload the registration form and try again.');
@@ -1553,6 +1568,10 @@ Object.keys(PROGRAMMES).forEach(key => {
     };
 
     try {
+      // Stop signature-only registrations if the web app URL still points at an older deployment.
+      btn.textContent = 'Checking PDF archive…';
+      await verifyPdfArchiveBackend_();
+
       // This PDF is a rendered copy of the actual form customers just completed.
       btn.textContent = 'Preparing PDF…';
       payload.pdfBase64 = await buildCompletedFormPdfBase64_(form, cfg);
@@ -1567,6 +1586,9 @@ Object.keys(PROGRAMMES).forEach(key => {
       });
       const data = await res.json();
       if (!data.ok) throw new Error(data.error || 'Unknown error');
+      if (data.pdfSaved !== true || typeof data.pdfUrl !== 'string' || !data.pdfUrl.trim()) {
+        throw new Error('PDF_NOT_CONFIRMED');
+      }
 
       const player = ((fields.firstName || fields.childFirstName || '') + ' ' +
                       (fields.lastName  || fields.childLastName  || '')).trim();
@@ -1581,9 +1603,16 @@ Object.keys(PROGRAMMES).forEach(key => {
       location.hash = '#/done';
     } catch (err){
       const detail = String(err && err.message ? err.message : '');
-      const message = detail.indexOf('PDF renderer') >= 0 || detail.indexOf('PDF export') >= 0 || detail.indexOf('completed-form PDF') >= 0 || detail.indexOf('completed registration form') >= 0
-        ? 'We could not create the PDF copy of the completed form. Please reload the page and try again.'
-        : 'We could not send your registration. Check your connection and try again, or call Racket Club reception on +357 26 828000.';
+      let message;
+      if (detail === 'PDF_BACKEND_NOT_UPDATED') {
+        message = 'Registration was not submitted because the PDF archive backend is not updated. Reception must update and redeploy the Masters Camp Apps Script before trying again.';
+      } else if (detail === 'PDF_NOT_CONFIRMED') {
+        message = 'The server did not confirm the saved PDF. Do not submit again yet; ask reception to check the Masters Camp records first.';
+      } else if (detail.indexOf('PDF renderer') >= 0 || detail.indexOf('PDF export') >= 0 || detail.indexOf('completed-form PDF') >= 0 || detail.indexOf('completed registration form') >= 0) {
+        message = 'We could not create the PDF copy of the completed form. No registration was submitted. Please reload the page and try again.';
+      } else {
+        message = 'We could not send your registration. Check your connection and try again, or call Racket Club reception on +357 26 828000.';
+      }
       showStatus(key, message);
       console.error(err);
     } finally {
