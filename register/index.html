@@ -981,9 +981,9 @@ input[type="date"].input{min-height:49px}
 /* ==================================================================
    CONFIG — the only two lines you normally edit
    ================================================================== */
-const ENDPOINT   = 'https://script.google.com/macros/s/AKfycbw8caVsJrat6CFqfXBQWfoDYfo4SVqaBiEospZ-4Y2QjuKJ6Y86qYa4knvv57838etZ/exec';
+const ENDPOINT   = 'https://script.google.com/macros/s/AKfycbyJ9f0owgezKorvxJBmcJJX3JC3KGkWSddpLpuySyg7WZGHCijLiajjx0Q9Nfo4y3Ut/exec';
 const FORM_TOKEN = 'MC-FORM-2026';   // Dedicated Masters Camp backend token
-const PDF_ARCHIVE_BUILD_REQUIRED = 'MC-PDF-ARCHIVE-20261018-V3';
+const PDF_ARCHIVE_BUILD_REQUIRED = 'MC-PDF-ARCHIVE-20261018-V4';
 /* ================================================================== */
 
 const COUNTRIES=[
@@ -1432,7 +1432,7 @@ async function buildCompletedFormPdfBase64_(form, cfg){
 
   const root = document.createElement('div');
   root.className = 'pdf-export-root';
-  root.style.cssText = 'position:absolute;left:0;top:0;width:794px;max-width:794px;z-index:-1000;overflow:visible;background:#F9F6F4;color:rgba(0,0,0,.70);';
+  root.style.cssText = 'position:fixed;left:0;top:0;width:794px;max-width:794px;min-height:1123px;z-index:2147483647;overflow:visible;pointer-events:none;background:#F9F6F4;color:rgba(0,0,0,.70);';
 
   const masthead = sourceHeader.cloneNode(true);
   masthead.style.width = '794px';
@@ -1510,6 +1510,7 @@ async function buildCompletedFormPdfBase64_(form, cfg){
 
   const style = document.createElement('style');
   style.textContent = `
+    body[data-pdf-rendering="true"] > :not(.pdf-export-root) { visibility:hidden !important; }
     .pdf-export-root, .pdf-export-root * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; animation:none !important; transition:none !important; }
     .pdf-export-root .page { width:794px !important; max-width:794px !important; margin:0 !important; padding:38px 40px 46px !important; }
     .pdf-export-root .grid--2 { grid-template-columns:1fr 1fr !important; }
@@ -1528,6 +1529,7 @@ async function buildCompletedFormPdfBase64_(form, cfg){
     footer.style.boxSizing = 'border-box';
     root.appendChild(footer);
   }
+  document.body.setAttribute('data-pdf-rendering', 'true');
   document.body.appendChild(root);
 
   try {
@@ -1541,7 +1543,7 @@ async function buildCompletedFormPdfBase64_(form, cfg){
       });
     }));
     await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-    const worker = window.html2pdf().set({
+    const options = {
       margin: [0, 0, 0, 0],
       image: { type: 'jpeg', quality: 0.96 },
       html2canvas: {
@@ -1551,12 +1553,39 @@ async function buildCompletedFormPdfBase64_(form, cfg){
         backgroundColor: '#F9F6F4',
         logging: false,
         windowWidth: 794,
+        windowHeight: Math.max(window.innerHeight || 1123, 1123),
         scrollX: 0,
         scrollY: 0
       },
       jsPDF: { unit: 'pt', format: 'a4', orientation: 'portrait', compress: true },
       pagebreak: { mode: ['css', 'legacy'], avoid: ['.fieldset', '.disclaimer', '.sig__frame', '.field'] }
-    }).from(root).toPdf();
+    };
+    // Render first, then check the captured canvas has real content before creating the PDF.
+    // The earlier negative z-index allowed the PDF canvas to capture the page background only.
+    let worker = window.html2pdf().set(options).from(root).toCanvas();
+    await worker;
+    const renderedCanvas = await worker.get('canvas');
+    if (!renderedCanvas || renderedCanvas.width < 500 || renderedCanvas.height < 500) {
+      throw new Error('The completed-form PDF render canvas has invalid dimensions. Please reload and retry.');
+    }
+    const ctx = renderedCanvas.getContext('2d', { willReadFrequently: true });
+    const imageData = ctx.getImageData(0, 0, renderedCanvas.width, renderedCanvas.height).data;
+    let contentPixels = 0;
+    // Ignore the masthead area; the completed form body must contain visible text/field details too.
+    const startY = Math.min(Math.round(170 * 1.6), Math.floor(renderedCanvas.height * 0.25));
+    for (let y = startY; y < renderedCanvas.height; y += 7) {
+      const row = y * renderedCanvas.width * 4;
+      for (let x = 0; x < renderedCanvas.width; x += 7) {
+        const i = row + x * 4;
+        const r = imageData[i], g = imageData[i+1], b = imageData[i+2], a = imageData[i+3];
+        // The page background is #F9F6F4. Count only strong text/brand/detail pixels, not pale paper fill.
+        if (a > 0 && (r < 185 || g < 185 || b < 185)) contentPixels++;
+      }
+    }
+    if (contentPixels < 300) {
+      throw new Error('PDF_RENDER_EMPTY: The completed form body rendered blank. Nothing was submitted.');
+    }
+    worker = worker.toPdf();
     const dataUri = await worker.outputPdf('datauristring');
     const comma = String(dataUri).indexOf(',');
     if (comma < 0) throw new Error('The completed-form PDF could not be encoded. Please try again.');
@@ -1566,6 +1595,7 @@ async function buildCompletedFormPdfBase64_(form, cfg){
     return base64;
   } finally {
     root.remove();
+    document.body.removeAttribute('data-pdf-rendering');
   }
 }
 
@@ -1661,7 +1691,7 @@ Object.keys(PROGRAMMES).forEach(key => {
         message = 'The server did not confirm the saved PDF. Do not submit again yet; ask reception to check the Masters Camp records first.';
       } else if (detail.indexOf('PDF_RENDERER_UNAVAILABLE') === 0) {
         message = 'The PDF tool could not load, so no registration was submitted. Check that this browser can access cdnjs/jsDelivr, disable content blocking for this page if applicable, then reload and try again.';
-      } else if (detail.indexOf('PDF renderer') >= 0 || detail.indexOf('PDF export') >= 0 || detail.indexOf('completed-form PDF') >= 0 || detail.indexOf('completed registration form') >= 0) {
+      } else if (detail.indexOf('PDF renderer') >= 0 || detail.indexOf('PDF export') >= 0 || detail.indexOf('completed-form PDF') >= 0 || detail.indexOf('completed registration form') >= 0 || detail.indexOf('PDF_RENDER_EMPTY') >= 0) {
         console.error('Masters Camp PDF generation failed:', err);
         message = 'We could not create the PDF copy of the completed form. No registration was submitted. Technical detail: ' + (detail || 'Unknown PDF rendering error').slice(0, 220) + '. Please reload the page and try again.';
       } else {
